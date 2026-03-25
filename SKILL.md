@@ -1,11 +1,12 @@
 ---
 name: synology-backup
-description: "Backup and restore OpenClaw workspace, configs, and agent data to a Synology NAS via SMB. Use when: backing up workspace files, restoring from a snapshot, checking backup status/health, or setting up automated backups. Supports Tailscale for secure remote VPS-to-NAS connectivity."
+description: "Backup and restore OpenClaw workspace, configs, and agent data to a Synology NAS via SMB or SSH/rsync. Use when: backing up workspace files, restoring from a snapshot, checking backup status/health, verifying backup integrity, or setting up automated daily backups. Supports Tailscale for secure remote VPS-to-NAS connectivity. Sends Telegram alert on failure."
+tags: ["backup", "synology", "nas", "smb", "rsync", "disaster-recovery", "tailscale"]
 ---
 
 # Synology Backup
 
-Backup OpenClaw data to a Synology NAS over SMB. Designed for secure, automated daily snapshots with configurable retention.
+Backup OpenClaw data to a Synology NAS over SMB or SSH/rsync. Designed for secure, automated daily snapshots with configurable retention, integrity verification, and failure alerting.
 
 ## Setup
 
@@ -24,20 +25,18 @@ For local network setups, use the NAS local IP directly.
 
 1. Create a dedicated user on the Synology (e.g., `openclaw-backup`) with minimal permissions
 2. Create or choose a shared folder (e.g., `backups`)
-3. Grant the user read/write access to **only** that folder
+3. Grant the user read/write access to **only** that folder — not admin access
 
-### 3. Credentials File
+### 3. Credentials File (SMB transport)
 
 Create an SMB credentials file with restricted permissions — **never store credentials in config or scripts**:
 
 ```bash
-# Create the file and set permissions (replace placeholders with your values)
 touch ~/.openclaw/.smb-credentials
 chmod 600 ~/.openclaw/.smb-credentials
-# Edit the file and add two lines:
-#   username=<your-synology-user>
-#   password=<your-synology-password>
-nano ~/.openclaw/.smb-credentials
+# Add two lines:
+# username=<your-synology-user>
+# password=<your-synology-password>
 ```
 
 ### 4. Configuration
@@ -51,6 +50,8 @@ Create `~/.openclaw/synology-backup.json`:
   "mountPoint": "/mnt/synology",
   "credentialsFile": "~/.openclaw/.smb-credentials",
   "smbVersion": "3.0",
+  "transport": "smb",
+  "telegramTarget": "-100xxxxxxxxxx",
   "backupPaths": [
     "~/.openclaw/workspace",
     "~/.openclaw/openclaw.json",
@@ -63,15 +64,20 @@ Create `~/.openclaw/synology-backup.json`:
 }
 ```
 
-**Note on sensitive files:** The `.env` file (containing API keys) is **not** included in the default backup paths. If you want to back it up, add `"~/.openclaw/.env"` to `backupPaths` — but ensure your Synology share has restricted access and the dedicated user has minimal permissions.
+**SSH transport (alternative):** Set `"transport": "ssh"` and add `"sshUser": "your-user"`. No credentials file needed — uses SSH key auth. Requires rsync + SSH access to the Synology.
+
+**Sensitive files:** The `.env` file (containing API keys) is not included by default. Add `"~/.openclaw/.env"` to `backupPaths` only if your NAS share has restricted access.
 
 | Field | Description | Default |
 |-------|-------------|---------|
 | `host` | Synology IP (Tailscale or local) | required |
 | `share` | SMB share path | required |
 | `mountPoint` | Local mount point | `/mnt/synology` |
-| `credentialsFile` | Path to SMB credentials file | required |
+| `credentialsFile` | Path to SMB credentials file | required (SMB) |
 | `smbVersion` | SMB protocol version | `3.0` |
+| `transport` | `smb` or `ssh` | `smb` |
+| `sshUser` | SSH username | required (SSH) |
+| `telegramTarget` | Telegram target for failure alerts | your group/chat ID |
 | `backupPaths` | Paths to backup | workspace + config |
 | `includeSubAgentWorkspaces` | Auto-include `workspace-*` dirs | `true` |
 | `retention` | Days of snapshots to keep | `7` |
@@ -83,12 +89,14 @@ Create `~/.openclaw/synology-backup.json`:
 apt-get install -y cifs-utils rsync
 ```
 
-### 6. Mount Setup
+### 6. Register the Backup Cron
 
-For persistent mounts across reboots, add to `/etc/fstab`:
-
-```
-//<host>/<share> /mnt/synology cifs credentials=<credentials-file>,vers=3.0,_netdev,nofail 0 0
+```bash
+openclaw cron add \
+  --name "Synology Backup" \
+  --schedule "0 3 * * *" \
+  --tz "America/Los_Angeles" \
+  --message "Run the daily Synology backup: bash ~/.openclaw/workspace/skills/synology-backup/scripts/backup.sh && bash ~/.openclaw/workspace/skills/synology-backup/scripts/verify.sh. If backup fails, it will automatically send a Telegram alert. Reply NO_REPLY."
 ```
 
 ## Usage
@@ -99,15 +107,7 @@ For persistent mounts across reboots, add to `/etc/fstab`:
 scripts/backup.sh
 ```
 
-Runs an incremental backup. First run copies everything; subsequent runs only sync changes.
-
-### Restore a Snapshot
-
-```bash
-scripts/restore.sh [date]
-```
-
-Restores from a specific date's snapshot (e.g., `2026-02-20`). Without a date, lists available snapshots.
+Runs an incremental backup. Add `--dry-run` to preview what would be backed up without touching anything.
 
 ### Check Status
 
@@ -115,7 +115,25 @@ Restores from a specific date's snapshot (e.g., `2026-02-20`). Without a date, l
 scripts/status.sh
 ```
 
-Shows last backup time, snapshot count, total size, and mount health.
+Shows mount health, last backup time, snapshot count, total size, and pre-restore safety snapshots.
+
+### Verify Integrity
+
+```bash
+scripts/verify.sh          # verify latest snapshot
+scripts/verify.sh 2026-03-25  # verify specific date
+```
+
+Checksums key files and counts directory contents against the snapshot to confirm data integrity.
+
+### Restore a Snapshot
+
+```bash
+scripts/restore.sh          # list available snapshots
+scripts/restore.sh 2026-03-25   # restore from specific date
+```
+
+Before restoring, automatically saves a **pre-restore safety snapshot** of your current state. If the restore goes wrong, restore the safety snapshot to undo.
 
 ## What Gets Backed Up
 
@@ -124,28 +142,44 @@ Shows last backup time, snapshot count, total size, and mount health.
 - `~/.openclaw/openclaw.json` — main config
 - `~/.openclaw/cron/` — cron job definitions
 - `~/.openclaw/agents/` — agent configurations
-- `~/.openclaw/.env` — **opt-in only** (contains API keys — add to backupPaths manually if desired)
+- `~/.openclaw/.env` — **opt-in only** (contains API keys)
 
 ## Snapshot Structure
 
 ```
 backups/
-├── 2026-02-20/
-│   ├── manifest.json
+├── 2026-03-25/
+│   ├── manifest.json          # timestamp, host, path counts
 │   ├── workspace/
-│   ├── workspace-email/
 │   ├── workspace-news/
 │   ├── agents/
 │   ├── cron/
 │   └── openclaw.json
-├── 2026-02-19/
+├── pre-restore-2026-03-25-143022/   # safety snapshot before restore
+├── 2026-03-24/
 └── ...
 ```
 
+## Failure Alerting
+
+If a backup fails for any reason, a Telegram alert is sent automatically:
+
+> ⚠️ Synology backup FAILED on <hostname> at <date> — exit code 1
+
+Configure the target via `telegramTarget` in the config.
+
 ## Security Notes
 
-- **Credentials**: Always use a dedicated credentials file with restricted permissions (`chmod 600`). Never inline secrets in config files, scripts, or fstab.
+- **Credentials**: Always use a dedicated credentials file with `chmod 600`. Never inline secrets in config, scripts, or fstab.
 - **Network**: Use Tailscale or a VPN for remote backups. Never expose SMB (port 445) to the public internet.
-- **Sensitive data**: The `.env` file contains API keys and is excluded from default backup paths. Only include it if your NAS share is properly secured with restricted user permissions.
-- **NAS user**: Create a dedicated Synology user with access to only the backup share — not an admin account.
-- **Retention**: Old snapshots are pruned by moving them to the Synology trash (if supported) or deleting them. Increase retention for critical environments.
+- **Sensitive data**: `.env` is excluded by default. Only include it if your NAS is properly secured.
+- **NAS user**: Dedicated user with access to only the backup share — not an admin account.
+- **Input validation**: All config values are validated before use — no shell injection possible via host, share, mount, or path fields.
+- **Path allowlist**: Restore uses an explicit allowlist (`workspace`, `cron`, `agents`, `openclaw.json`, `.env`) — no arbitrary path writes.
+
+## System Access
+
+**Files read:** `~/.openclaw/synology-backup.json`, `~/.openclaw/.smb-credentials`
+**Files written:** Synology NAS share (via SMB mount or SSH/rsync), `manifest.json` in each snapshot
+**Network:** SMB (port 445) or SSH (port 22) to Synology NAS IP only
+**Commands used:** `mount`, `rsync`, `cp`, `find`, `du`, `df`, `md5sum`, `jq`, `openclaw message send`
