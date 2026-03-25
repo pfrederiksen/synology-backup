@@ -52,14 +52,17 @@ Create `~/.openclaw/synology-backup.json`:
   "smbVersion": "3.0",
   "transport": "smb",
   "telegramTarget": "-100xxxxxxxxxx",
+  "notifyOnSuccess": false,
   "backupPaths": [
     "~/.openclaw/workspace",
     "~/.openclaw/openclaw.json",
     "~/.openclaw/cron",
     "~/.openclaw/agents"
   ],
+  "backupExclude": [],
   "includeSubAgentWorkspaces": true,
   "retention": 7,
+  "preRestoreRetention": 3,
   "schedule": "0 3 * * *"
 }
 ```
@@ -80,8 +83,15 @@ Create `~/.openclaw/synology-backup.json`:
 | `telegramTarget` | Telegram target for failure alerts | your group/chat ID |
 | `backupPaths` | Paths to backup | workspace + config |
 | `includeSubAgentWorkspaces` | Auto-include `workspace-*` dirs | `true` |
-| `retention` | Days of snapshots to keep | `7` |
+| `retention` | Days of daily snapshots to keep | `7` |
+| `preRestoreRetention` | Days to keep pre-restore safety snapshots | `3` |
+| `backupExclude` | rsync exclude patterns (`.git/`, `node_modules/` always excluded) | `[]` |
+| `notifyOnSuccess` | Send Telegram on successful backup (in addition to failures) | `false` |
 | `schedule` | Cron expression (host timezone) | `0 3 * * *` |
+| `sshUser` | SSH username (required for ssh transport) | — |
+| `sshHost` | SSH hostname (defaults to `host`) | — |
+| `sshPort` | SSH port | `22` |
+| `sshDest` | Remote backup directory path (required for ssh transport) | — |
 
 ### 5. Install Dependencies
 

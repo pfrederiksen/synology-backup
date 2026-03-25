@@ -37,6 +37,15 @@ if mountpoint -q "$MOUNT" 2>/dev/null; then
     echo "Disk:      $DISK_AVAIL available of $DISK_SIZE ($DISK_PCT used)"
 fi
 
+# Last success from state file
+LAST_SUCCESS="$(read_last_success)"
+if [[ "$LAST_SUCCESS" == "never" ]]; then
+    echo "Last backup: ⚠️  Never (or state file missing)"
+else
+    echo "Last backup: ✅ $LAST_SUCCESS"
+fi
+echo ""
+
 # Snapshots
 if [[ -d "$BACKUP_DIR" ]]; then
     SNAP_COUNT="$(ls -1 "$BACKUP_DIR" | grep -cE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' 2>/dev/null || echo 0)"
