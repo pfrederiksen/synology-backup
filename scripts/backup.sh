@@ -39,9 +39,10 @@ if [[ "$DRY_RUN" == "true" ]]; then
 fi
 
 # Trap to send Telegram alert on failure
+# rsync exit codes: 0=success, 24=vanished source files (benign), anything else = real error
 cleanup_on_error() {
     local exit_code=$?
-    if [[ $exit_code -ne 0 ]]; then
+    if [[ $exit_code -ne 0 && $exit_code -ne 24 ]]; then
         send_telegram "⚠️ Synology backup FAILED on $(hostname) at $(date '+%Y-%m-%d %H:%M PT') — exit code $exit_code"
     fi
 }
