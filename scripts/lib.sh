@@ -17,6 +17,9 @@ load_config() {
         exit 1
     fi
 
+    # Export CONFIG so validate_config can use it for backupPaths iteration
+    CONFIG="$config"
+
     HOST="$(jq -r '.host' "$config")"
     SHARE="$(jq -r '.share' "$config")"
     MOUNT="$(jq -r '.mountPoint // "/mnt/synology"' "$config")"
