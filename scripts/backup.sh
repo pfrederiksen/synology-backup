@@ -88,7 +88,7 @@ while IFS= read -r path_raw; do
         fi
     else
         if [[ "$TRANSPORT" == "ssh" ]]; then
-            scp -P "${SSH_PORT}" -q -- "$path" "$(remote_path "backups/$TIMESTAMP/$name")"
+            rsync -a -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"                 -- "$path" "$(remote_path "backups/$TIMESTAMP/$name")"
         else
             cp -- "$path" "${SNAP_DIR}/${name}"
         fi
@@ -140,7 +140,7 @@ MANIFEST_CHECKSUM="$(md5sum "$MANIFEST_PATH" | cut -d' ' -f1)"
 
 # Upload manifest for SSH transport
 if [[ "$TRANSPORT" == "ssh" ]]; then
-    scp -P "${SSH_PORT}" -q -- "$MANIFEST_PATH" "$(remote_path "backups/$TIMESTAMP/manifest.json")"
+    rsync -a -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"         -- "$MANIFEST_PATH" "$(remote_path "backups/$TIMESTAMP/manifest.json")"
     rm -f -- "$MANIFEST_PATH"
 fi
 

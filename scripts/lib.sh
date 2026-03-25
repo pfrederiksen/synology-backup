@@ -35,6 +35,9 @@ load_config() {
     SSH_DEST="$(jq -r '.sshDest // ""' "$config")"
     TELEGRAM_TARGET="$(jq -r '.telegramTarget // ""' "$config")"
     NOTIFY_ON_SUCCESS="$(jq -r '.notifyOnSuccess // false' "$config")"
+    if [[ "$NOTIFY_ON_SUCCESS" != "true" && "$NOTIFY_ON_SUCCESS" != "false" ]]; then
+        NOTIFY_ON_SUCCESS="false"
+    fi
     STATE_FILE="$(jq -r '.stateFile // ""' "$config" | sed "s|^~|$HOME|")"
     # Default state file alongside config
     [[ -z "$STATE_FILE" ]] && STATE_FILE="$(dirname "$config")/.synology-backup-state.json"
@@ -111,8 +114,19 @@ validate_config() {
         if ! [[ "$SSH_USER" =~ ^[a-zA-Z0-9_-]+$ ]]; then
             echo "Error: sshUser contains invalid characters" >&2; exit 1
         fi
+        # Validate SSH_HOST independently (may differ from HOST)
+        if [[ -z "$SSH_HOST" || "$SSH_HOST" == "null" ]]; then
+            echo "Error: sshHost is required for ssh transport" >&2; exit 1
+        fi
+        if ! [[ "$SSH_HOST" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "Error: sshHost contains invalid characters" >&2; exit 1
+        fi
         if [[ -z "$SSH_DEST" || "$SSH_DEST" == "null" ]]; then
             echo "Error: sshDest (remote backup path) is required for ssh transport" >&2; exit 1
+        fi
+        # sshDest: alphanumeric, slashes, hyphens, underscores, dots — no traversal or metacharacters
+        if ! [[ "$SSH_DEST" =~ ^[a-zA-Z0-9/_.-]+$ ]]; then
+            echo "Error: sshDest contains invalid characters" >&2; exit 1
         fi
         if [[ "$SSH_DEST" == *".."* ]]; then
             echo "Error: sshDest must not contain path traversal (..)" >&2; exit 1
