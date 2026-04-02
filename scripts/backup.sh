@@ -1,7 +1,16 @@
 #!/bin/bash
 # Synology Backup — Incremental daily snapshot
 # Usage: backup.sh [--dry-run]
-set -euo pipefail
+#
+# Resilience notes:
+# - No set -euo pipefail — each path is attempted independently
+# - Symlinks are dereferenced (--copy-links) to avoid I/O errors on SMB/NAS
+# - rsync exit 23 (partial transfer) is treated as warning, not failure
+# - rsync exit 24 (vanished files) is treated as success
+# - Mount includes retry loop + health check
+# - Failure alerts include per-path details
+
+set -u  # Unset variable detection, but no -e (we handle errors per-path)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="${SYNOLOGY_BACKUP_CONFIG:-$HOME/.openclaw/synology-backup.json}"
@@ -48,25 +57,74 @@ if [[ "$DRY_RUN" == "true" ]]; then
     exit 0
 fi
 
-# Trap: alert on failure (rsync 24 = vanished files = benign, not a real error)
-cleanup_on_error() {
-    local exit_code=$?
-    if [[ $exit_code -ne 0 && $exit_code -ne 24 ]]; then
-        send_telegram "⚠️ Synology backup FAILED on $(hostname) — exit code $exit_code"
-    fi
-}
-trap cleanup_on_error EXIT
+# ---------------------------------------------------------------------------
+# Tracking arrays for per-path success/failure reporting
+# ---------------------------------------------------------------------------
+backed_up=0
+skipped=0
+failed=0
+failed_paths=()
 
-ensure_mounted
+# ---------------------------------------------------------------------------
+# Mount with retry + health check
+# ---------------------------------------------------------------------------
+if ! ensure_mounted_with_retry; then
+    send_telegram "⚠️ Synology backup FAILED on $(hostname) — could not mount NAS after 3 attempts"
+    exit 1
+fi
 
 if [[ "$TRANSPORT" == "smb" ]]; then
     mkdir -p -- "$SNAP_DIR"
 fi
 
-backed_up=0
-skipped=0
+# ---------------------------------------------------------------------------
+# Helper: run rsync for a single path and handle exit codes
+# Returns 0 on success/warning, 1 on hard failure
+# ---------------------------------------------------------------------------
+do_rsync() {
+    local src="$1"
+    local dest="$2"
+    local name="$3"
+    local rc=0
 
+    if [[ "$TRANSPORT" == "ssh" ]]; then
+        rsync -a --copy-links --delete \
+            -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+            "${EXCLUDE_ARGS[@]}" -- \
+            "$src" "$(remote_path "$dest")" || rc=$?
+    else
+        rsync -a --copy-links --delete \
+            "${EXCLUDE_ARGS[@]}" -- \
+            "$src" "$dest" || rc=$?
+    fi
+
+    case $rc in
+        0)
+            # Perfect success
+            return 0
+            ;;
+        23)
+            # Partial transfer — some files transferred, some had issues
+            # This is non-fatal: better to have most files than none
+            echo "⚠️  rsync warning (exit 23, partial transfer) for: $name"
+            return 0
+            ;;
+        24)
+            # Vanished files — source changed during transfer, benign
+            echo "⚠️  rsync warning (exit 24, vanished files) for: $name"
+            return 0
+            ;;
+        *)
+            # Real failure
+            echo "❌ rsync FAILED (exit $rc) for: $name" >&2
+            return 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # Backup configured paths
+# ---------------------------------------------------------------------------
 while IFS= read -r path_raw; do
     path="$(echo "$path_raw" | sed "s|^~|$HOME|")"
 
@@ -79,25 +137,42 @@ while IFS= read -r path_raw; do
     name="$(basename -- "$path")"
 
     if [[ -d "$path" ]]; then
-        if [[ "$TRANSPORT" == "ssh" ]]; then
-            rsync -a --delete -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
-                "${EXCLUDE_ARGS[@]}" -- \
-                "${path}/" "$(remote_path "backups/$TIMESTAMP/$name/")"
+        if do_rsync "${path}/" "backups/$TIMESTAMP/$name/" "$name"; then
+            echo "✓ $name"
+            (( backed_up++ )) || true
         else
-            rsync -a --delete "${EXCLUDE_ARGS[@]}" -- "${path}/" "${SNAP_DIR}/${name}/"
+            (( failed++ )) || true
+            failed_paths+=("$name")
         fi
     else
+        # Single file — use cp for local, rsync for SSH
         if [[ "$TRANSPORT" == "ssh" ]]; then
-            rsync -a -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"                 -- "$path" "$(remote_path "backups/$TIMESTAMP/$name")"
+            if rsync -a --copy-links \
+                -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+                -- "$path" "$(remote_path "backups/$TIMESTAMP/$name")" 2>/dev/null; then
+                echo "✓ $name"
+                (( backed_up++ )) || true
+            else
+                echo "❌ Failed to copy file: $name" >&2
+                (( failed++ )) || true
+                failed_paths+=("$name")
+            fi
         else
-            cp -- "$path" "${SNAP_DIR}/${name}"
+            if cp -- "$path" "${SNAP_DIR}/${name}" 2>/dev/null; then
+                echo "✓ $name"
+                (( backed_up++ )) || true
+            else
+                echo "❌ Failed to copy file: $name" >&2
+                (( failed++ )) || true
+                failed_paths+=("$name")
+            fi
         fi
     fi
-    echo "✓ $name"
-    (( backed_up++ )) || true
 done < <(jq -r '.backupPaths[]' "$CONFIG")
 
+# ---------------------------------------------------------------------------
 # Backup sub-agent workspaces
+# ---------------------------------------------------------------------------
 if [[ "$INCLUDE_SUBAGENT" == "true" ]]; then
     for ws in "$HOME"/.openclaw/workspace-*/; do
         [[ -d "$ws" ]] || continue
@@ -106,19 +181,24 @@ if [[ "$INCLUDE_SUBAGENT" == "true" ]]; then
             echo "⚠️  Skipping suspicious workspace name: $name"
             continue
         fi
-        if [[ "$TRANSPORT" == "ssh" ]]; then
-            rsync -a --delete -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
-                "${EXCLUDE_ARGS[@]}" -- \
-                "${ws}" "$(remote_path "backups/$TIMESTAMP/$name/")"
+        if do_rsync "${ws}" "backups/$TIMESTAMP/$name/" "$name"; then
+            echo "✓ $name (sub-agent)"
+            (( backed_up++ )) || true
         else
-            rsync -a --delete "${EXCLUDE_ARGS[@]}" -- "${ws}" "${SNAP_DIR}/${name}/"
+            (( failed++ )) || true
+            failed_paths+=("$name")
         fi
-        echo "✓ $name (sub-agent)"
-        (( backed_up++ )) || true
     done
 fi
 
+# ---------------------------------------------------------------------------
+# Total paths attempted
+# ---------------------------------------------------------------------------
+total_paths=$(( backed_up + skipped + failed ))
+
+# ---------------------------------------------------------------------------
 # Write manifest + compute checksum
+# ---------------------------------------------------------------------------
 if [[ "$TRANSPORT" == "smb" ]]; then
     MANIFEST_PATH="${SNAP_DIR}/manifest.json"
 else
@@ -132,7 +212,9 @@ cat > "$MANIFEST_PATH" << MANIFEST
   "host": "$(hostname)",
   "transport": "$TRANSPORT",
   "backed_up": $backed_up,
-  "skipped": $skipped
+  "skipped": $skipped,
+  "failed": $failed,
+  "failed_paths": $(printf '%s\n' "${failed_paths[@]:-}" | jq -R . | jq -s . 2>/dev/null || echo '[]')
 }
 MANIFEST
 
@@ -140,11 +222,14 @@ MANIFEST_CHECKSUM="$(md5sum "$MANIFEST_PATH" | cut -d' ' -f1)"
 
 # Upload manifest for SSH transport
 if [[ "$TRANSPORT" == "ssh" ]]; then
-    rsync -a -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"         -- "$MANIFEST_PATH" "$(remote_path "backups/$TIMESTAMP/manifest.json")"
+    rsync -a -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+        -- "$MANIFEST_PATH" "$(remote_path "backups/$TIMESTAMP/manifest.json")" 2>/dev/null || true
     rm -f -- "$MANIFEST_PATH"
 fi
 
+# ---------------------------------------------------------------------------
 # Prune old daily snapshots (SMB only — SSH pruning would need ssh commands)
+# ---------------------------------------------------------------------------
 if [[ "$TRANSPORT" == "smb" ]]; then
     TRASH_DIR="$BACKUP_DIR/.trash"
     mkdir -p -- "$TRASH_DIR"
@@ -181,18 +266,44 @@ else
     SNAP_COUNT="unknown"
 fi
 
-# Write state file (last success timestamp + manifest checksum)
-write_success_state "$TIMESTAMP" "$TOTAL_SIZE" "$MANIFEST_CHECKSUM"
-
+# ---------------------------------------------------------------------------
+# Report results
+# ---------------------------------------------------------------------------
 echo ""
-echo "✅ Backup complete: $TIMESTAMP ($TOTAL_SIZE)"
-echo "   $backed_up paths backed up, $skipped skipped"
+echo "Backup summary: $TIMESTAMP ($TOTAL_SIZE)"
+echo "   ✅ $backed_up backed up | ⏭️  $skipped skipped | ❌ $failed failed"
+if [[ ${#failed_paths[@]} -gt 0 ]]; then
+    echo "   Failed paths: ${failed_paths[*]}"
+fi
 echo "   Snapshots: $SNAP_COUNT | Manifest checksum: $MANIFEST_CHECKSUM"
 
-# Optional success notification
-if [[ "$NOTIFY_ON_SUCCESS" == "true" ]]; then
-    send_telegram "✅ Synology backup complete — $TIMESTAMP ($TOTAL_SIZE, $backed_up paths)"
-fi
+# ---------------------------------------------------------------------------
+# Alerts and state
+# ---------------------------------------------------------------------------
+if [[ "$failed" -gt 0 ]]; then
+    # Partial failure — some paths succeeded, some didn't
+    failed_list="${failed_paths[*]}"
+    send_telegram "⚠️ Synology backup PARTIAL on $(hostname) — $TIMESTAMP
+${backed_up}/${total_paths} paths backed up, ${failed} failed: ${failed_list}
+Skipped: ${skipped}"
+    # Still write state if anything succeeded
+    if [[ "$backed_up" -gt 0 ]]; then
+        write_success_state "$TIMESTAMP" "$TOTAL_SIZE" "$MANIFEST_CHECKSUM"
+    fi
+    exit 1
+elif [[ "$backed_up" -eq 0 && "$skipped" -gt 0 ]]; then
+    # Nothing backed up but nothing failed either (all paths not found)
+    send_telegram "⚠️ Synology backup WARNING on $(hostname) — $TIMESTAMP — all $skipped paths skipped (not found)"
+    exit 0
+else
+    # Full success
+    write_success_state "$TIMESTAMP" "$TOTAL_SIZE" "$MANIFEST_CHECKSUM"
 
-# Clear error trap — succeeded
-trap - EXIT
+    echo ""
+    echo "✅ Backup complete: $TIMESTAMP ($TOTAL_SIZE)"
+
+    if [[ "$NOTIFY_ON_SUCCESS" == "true" ]]; then
+        send_telegram "✅ Synology backup complete — $TIMESTAMP ($TOTAL_SIZE, ${backed_up}/${total_paths} paths)"
+    fi
+    exit 0
+fi

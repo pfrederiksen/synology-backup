@@ -203,6 +203,47 @@ ensure_mounted() {
     # SSH transport: no local mount needed — rsync connects directly
 }
 
+# Mount with retry + health check.
+# Retries up to 3 times with 10s sleep between attempts.
+# After successful mount, verifies the NAS is responsive with a write test.
+ensure_mounted_with_retry() {
+    local max_attempts=3
+    local attempt
+
+    for (( attempt=1; attempt<=max_attempts; attempt++ )); do
+        echo "Mount attempt $attempt/$max_attempts..."
+
+        # Try to mount
+        if ensure_mounted; then
+            # For SSH transport, no mount health check needed
+            if [[ "$TRANSPORT" == "ssh" ]]; then
+                echo "SSH transport — no mount needed"
+                return 0
+            fi
+
+            # Health check: verify the NAS is actually responsive
+            if touch "$MOUNT/.ping" 2>/dev/null && rm -f "$MOUNT/.ping" 2>/dev/null; then
+                echo "Mount health check passed"
+                return 0
+            else
+                echo "⚠️  Mount exists but NAS not responsive (write test failed)" >&2
+                # Try to unmount and re-mount on next attempt
+                umount "$MOUNT" 2>/dev/null || true
+            fi
+        else
+            echo "⚠️  Mount failed on attempt $attempt" >&2
+        fi
+
+        if [[ "$attempt" -lt "$max_attempts" ]]; then
+            echo "Retrying in 10s..."
+            sleep 10
+        fi
+    done
+
+    echo "Error: Failed to mount after $max_attempts attempts" >&2
+    return 1
+}
+
 # Remote path helper for SSH transport
 remote_path() {
     local subpath="$1"
@@ -210,6 +251,7 @@ remote_path() {
 }
 
 # Rsync with SSH transport support
+# Dereferences symlinks (--copy-links) to avoid I/O errors on SMB/NAS
 rsync_to_dest() {
     local src="$1"
     local dest_subpath="$2"
@@ -217,11 +259,11 @@ rsync_to_dest() {
     mapfile -t exclude_args < <(build_exclude_args)
 
     if [[ "$TRANSPORT" == "ssh" ]]; then
-        rsync -a --delete -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+        rsync -a --copy-links --delete -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
             "${exclude_args[@]}" -- \
             "$src" "$(remote_path "$dest_subpath")"
     else
-        rsync -a --delete \
+        rsync -a --copy-links --delete \
             "${exclude_args[@]}" -- \
             "$src" "$dest_subpath"
     fi
