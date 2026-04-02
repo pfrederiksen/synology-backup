@@ -1,6 +1,17 @@
 ---
 name: synology-backup
 description: "Backup and restore OpenClaw workspace, configs, and agent data to a Synology NAS via SMB or SSH/rsync. Use when: backing up workspace files, restoring from a snapshot, checking backup status/health, verifying backup integrity, or setting up automated daily backups. Supports Tailscale for secure remote VPS-to-NAS connectivity. Sends Telegram alert on failure."
+metadata:
+  openclaw:
+    requires:
+      bins:
+        - rsync
+        - jq
+      apt:
+        - rsync
+        - jq
+        - cifs-utils
+      notes: "SSH transport requires SSH key auth to Synology. SMB transport requires cifs-utils and a chmod 600 credentials file. openclaw CLI required for cron registration and Telegram alerts."
 ---
 
 # Synology Backup

@@ -259,7 +259,7 @@ rsync_to_dest() {
     mapfile -t exclude_args < <(build_exclude_args)
 
     if [[ "$TRANSPORT" == "ssh" ]]; then
-        rsync -a --copy-links --delete -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+        rsync -a --copy-links --delete -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=yes" \
             "${exclude_args[@]}" -- \
             "$src" "$(remote_path "$dest_subpath")"
     else

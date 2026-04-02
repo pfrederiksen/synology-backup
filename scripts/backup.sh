@@ -89,7 +89,7 @@ do_rsync() {
 
     if [[ "$TRANSPORT" == "ssh" ]]; then
         rsync -a --copy-links --delete \
-            -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+            -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=yes" \
             "${EXCLUDE_ARGS[@]}" -- \
             "$src" "$(remote_path "$dest")" || rc=$?
     else
@@ -148,7 +148,7 @@ while IFS= read -r path_raw; do
         # Single file — use cp for local, rsync for SSH
         if [[ "$TRANSPORT" == "ssh" ]]; then
             if rsync -a --copy-links \
-                -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+                -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=yes" \
                 -- "$path" "$(remote_path "backups/$TIMESTAMP/$name")" 2>/dev/null; then
                 echo "✓ $name"
                 (( backed_up++ )) || true
@@ -222,7 +222,7 @@ MANIFEST_CHECKSUM="$(md5sum "$MANIFEST_PATH" | cut -d' ' -f1)"
 
 # Upload manifest for SSH transport
 if [[ "$TRANSPORT" == "ssh" ]]; then
-    rsync -a -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+    rsync -a -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=yes" \
         -- "$MANIFEST_PATH" "$(remote_path "backups/$TIMESTAMP/manifest.json")" 2>/dev/null || true
     rm -f -- "$MANIFEST_PATH"
 fi
