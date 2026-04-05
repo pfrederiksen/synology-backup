@@ -1,6 +1,6 @@
 ---
 name: synology-backup
-description: "Backup and restore OpenClaw workspace, configs, and agent data to a Synology NAS via SMB or SSH/rsync. Use when: backing up workspace files, restoring from a snapshot, checking backup status/health, verifying backup integrity, or setting up automated daily backups. Supports Tailscale for secure remote VPS-to-NAS connectivity. Sends Telegram alert on failure."
+description: "Backup and restore OpenClaw workspace, configs, and agent data to a Synology NAS via SMB or SSH/rsync. Use when: backing up workspace files, restoring from a snapshot, checking backup status/health, verifying backup integrity, or setting up automated daily backups. Supports Tailscale for secure remote VPS-to-NAS connectivity. Designed for explicit OpenClaw cron/session notifications instead of hidden shell-side delivery."
 metadata:
   openclaw:
     requires:
@@ -11,7 +11,7 @@ metadata:
         - rsync
         - jq
         - cifs-utils
-      notes: "SSH transport requires SSH key auth to Synology. SMB transport requires cifs-utils and a chmod 600 credentials file. openclaw CLI required for cron registration and Telegram alerts."
+      notes: "SSH transport requires SSH key auth to Synology. SMB transport requires cifs-utils and a chmod 600 credentials file. Cron/session layer should own notifications explicitly."
 ---
 
 # Synology Backup
@@ -61,7 +61,6 @@ Create `~/.openclaw/synology-backup.json`:
   "credentialsFile": "~/.openclaw/.smb-credentials",
   "smbVersion": "3.0",
   "transport": "smb",
-  "telegramTarget": "-100xxxxxxxxxx",
   "notifyOnSuccess": false,
   "backupPaths": [
     "~/.openclaw/workspace",
@@ -79,7 +78,7 @@ Create `~/.openclaw/synology-backup.json`:
 
 **SSH transport (recommended):** Set `"transport": "ssh"` and add `"sshUser": "your-user"`. No credentials file needed — uses SSH key auth. Requires rsync + SSH access to the Synology.
 
-> ⚠️ **SSH host key warning:** Scripts use `StrictHostKeyChecking=accept-new`, which auto-trusts a host key on first connection. To harden this: SSH to your NAS manually once first (`ssh user@nas-ip`) to add its key to `~/.ssh/known_hosts`, then change to `StrictHostKeyChecking=yes` in `lib.sh`.
+> ⚠️ **SSH host key warning:** Scripts use `StrictHostKeyChecking=yes`. Add your NAS host key to `~/.ssh/known_hosts` first by connecting manually once (`ssh user@nas-ip`) before automation.
 
 **Sensitive files:** The `.env` file (containing API keys) is **excluded by default**. Only add it to `backupPaths` if your NAS share is restricted to a dedicated low-privilege user and encrypted at rest. When in doubt, leave it out — you can always re-enter API keys from scratch.
 
@@ -92,24 +91,19 @@ Create `~/.openclaw/synology-backup.json`:
 | `smbVersion` | SMB protocol version | `3.0` |
 | `transport` | `smb` or `ssh` | `smb` |
 | `sshUser` | SSH username | required (SSH) |
-| `telegramTarget` | Telegram target for failure alerts | your group/chat ID |
 | `backupPaths` | Paths to backup | workspace + config |
 | `includeSubAgentWorkspaces` | Auto-include `workspace-*` dirs | `true` |
 | `retention` | Days of daily snapshots to keep | `7` |
 | `preRestoreRetention` | Days to keep pre-restore safety snapshots | `3` |
 | `backupExclude` | rsync exclude patterns (`.git/`, `node_modules/` always excluded) | `[]` |
-| `notifyOnSuccess` | Send Telegram on successful backup (in addition to failures) | `false` |
+| `notifyOnSuccess` | Write success state and allow higher-level success reporting if desired | `false` |
 | `schedule` | Cron expression (host timezone) | `0 3 * * *` |
 | `sshUser` | SSH username (required for ssh transport) | — |
 | `sshHost` | SSH hostname (defaults to `host`) | — |
 | `sshPort` | SSH port | `22` |
 | `sshDest` | Remote backup directory path (required for ssh transport) | — |
 
-### 5. Telegram Alerts (optional)
-
-Failure alerts use `openclaw message send` — no bot token needed; OpenClaw handles delivery. Just set `telegramTarget` in config to your chat/group ID (e.g. `-1001234567890`). Leave it empty to disable alerts entirely.
-
-### 6. Install Dependencies
+### 5. Install Dependencies
 
 ```bash
 apt-get install -y cifs-utils rsync jq
@@ -124,7 +118,7 @@ openclaw cron add \
   --name "Synology Backup" \
   --schedule "0 3 * * *" \
   --tz "America/Los_Angeles" \
-  --message "Run the daily Synology backup: bash ~/.openclaw/workspace/skills/synology-backup/scripts/backup.sh && bash ~/.openclaw/workspace/skills/synology-backup/scripts/verify.sh. If backup fails, it will automatically send a Telegram alert. Reply NO_REPLY."
+  --message "Run the daily Synology backup: bash ~/.openclaw/workspace/skills/synology-backup/scripts/backup.sh && bash ~/.openclaw/workspace/skills/synology-backup/scripts/verify.sh. If either step fails, use the OpenClaw message tool explicitly to alert the target channel with the failing step and key error text. Then reply NO_REPLY."
 ```
 
 ## Usage
@@ -190,11 +184,12 @@ backups/
 
 ## Failure Alerting
 
-If a backup fails for any reason, a Telegram alert is sent automatically:
+If a backup fails, the recommended pattern is for the **OpenClaw cron/session layer** to send the alert explicitly via the `message` tool.
 
-> ⚠️ Synology backup FAILED on <hostname> at <date> — exit code 1
-
-Configure the target via `telegramTarget` in the config.
+Recommended alert contents:
+- which step failed (`backup.sh` or `verify.sh`)
+- key error text
+- hostname and snapshot date when available
 
 ## Before You Enable Automated Cron
 
@@ -203,14 +198,14 @@ Run with `--dry-run` first and review the output:
 scripts/backup.sh --dry-run
 ```
 
-Check `scripts/lib.sh` — specifically `send_telegram()` — to understand what network calls are made. No credentials are stored there; it delegates to `openclaw message send`.
+Then make sure your cron prompt owns notification behavior explicitly instead of relying on shell-side delivery.
 
 ## Security Notes
 
 - **Credentials**: Always use a dedicated SMB credentials file with `chmod 600`. Never inline secrets in config, scripts, or fstab.
-- **jq required**: Install with `apt-get install -y jq`. All scripts fail silently without it.
-- **Telegram alerts**: Use `openclaw message send` (no bot token in this skill). Set `telegramTarget` to your chat ID or leave empty to disable.
-- **SSH host keys**: `StrictHostKeyChecking=accept-new` auto-trusts on first connect. For hardened setups, pre-provision `~/.ssh/known_hosts` and switch to `StrictHostKeyChecking=yes` in `lib.sh`.
+- **jq required**: Install with `apt-get install -y jq`. All scripts depend on it for config parsing.
+- **Notifications**: Keep notification ownership in the OpenClaw cron/session layer. Avoid hidden shell-side delivery paths.
+- **SSH host keys**: Pre-provision `~/.ssh/known_hosts` and keep `StrictHostKeyChecking=yes` in `lib.sh` for hardened setups.
 - **Network**: Use Tailscale or a VPN for remote backups. Never expose SMB (port 445) to the public internet.
 - **Sensitive data**: `.env` excluded by default — only include if NAS access is tightly restricted.
 - **NAS user**: Dedicated user with access to only the backup share — not an admin account.
@@ -222,5 +217,5 @@ Check `scripts/lib.sh` — specifically `send_telegram()` — to understand what
 **Files read:** `~/.openclaw/synology-backup.json`, `~/.openclaw/.smb-credentials`
 **Files written:** Synology NAS share (via SMB mount or SSH/rsync), `manifest.json` in each snapshot
 **Network:** SMB (port 445) or SSH (port 22) to Synology NAS IP only
-**Commands used:** `mount`, `rsync`, `cp`, `find`, `du`, `df`, `md5sum`, `jq` (required), `openclaw message send` (for Telegram alerts, no bot token stored here)
-**Secrets stored:** None — SMB credentials live in a separate `chmod 600` file; Telegram delivery handled by OpenClaw
+**Commands used:** `mount`, `rsync`, `cp`, `find`, `du`, `df`, `md5sum`, `jq` (required)
+**Secrets stored:** None — SMB credentials live in a separate `chmod 600` file

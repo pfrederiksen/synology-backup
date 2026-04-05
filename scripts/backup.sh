@@ -74,7 +74,18 @@ if ! ensure_mounted_with_retry; then
 fi
 
 if [[ "$TRANSPORT" == "smb" ]]; then
-    mkdir -p -- "$SNAP_DIR"
+    if ! mkdir -p -- "$SNAP_DIR"; then
+        echo "❌ Failed to create snapshot directory: $SNAP_DIR" >&2
+        send_telegram "⚠️ Synology backup FAILED on $(hostname) — could not create snapshot dir $SNAP_DIR (check NAS mount + permissions)"
+        exit 1
+    fi
+    # Verify directory is actually writable before attempting rsync
+    if ! touch -- "${SNAP_DIR}/.ping" 2>/dev/null; then
+        echo "❌ Snapshot directory not writable: $SNAP_DIR" >&2
+        send_telegram "⚠️ Synology backup FAILED on $(hostname) — snapshot dir not writable: $SNAP_DIR"
+        exit 1
+    fi
+    rm -f -- "${SNAP_DIR}/.ping"
 fi
 
 # ---------------------------------------------------------------------------
@@ -137,7 +148,7 @@ while IFS= read -r path_raw; do
     name="$(basename -- "$path")"
 
     if [[ -d "$path" ]]; then
-        if do_rsync "${path}/" "backups/$TIMESTAMP/$name/" "$name"; then
+        if do_rsync "${path}/" "${SNAP_DIR}/${name}/" "$name"; then
             echo "✓ $name"
             (( backed_up++ )) || true
         else
@@ -158,7 +169,8 @@ while IFS= read -r path_raw; do
                 failed_paths+=("$name")
             fi
         else
-            if cp -- "$path" "${SNAP_DIR}/${name}" 2>/dev/null; then
+            if rsync -a --copy-links \
+                -- "$path" "${SNAP_DIR}/${name}" 2>/dev/null; then
                 echo "✓ $name"
                 (( backed_up++ )) || true
             else
@@ -181,7 +193,7 @@ if [[ "$INCLUDE_SUBAGENT" == "true" ]]; then
             echo "⚠️  Skipping suspicious workspace name: $name"
             continue
         fi
-        if do_rsync "${ws}" "backups/$TIMESTAMP/$name/" "$name"; then
+        if do_rsync "${ws}" "${SNAP_DIR}/${name}/" "$name"; then
             echo "✓ $name (sub-agent)"
             (( backed_up++ )) || true
         else

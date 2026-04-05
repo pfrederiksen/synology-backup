@@ -296,15 +296,11 @@ read_last_success() {
 }
 
 # ---------------------------------------------------------------------------
-# Telegram alert
+# Legacy notification shim
 # ---------------------------------------------------------------------------
 
 send_telegram() {
     local msg="$1"
-    [[ -z "$TELEGRAM_TARGET" ]] && return 0
-    # Fire-and-forget — never let a notification failure abort a backup
-    openclaw message send \
-        --channel telegram \
-        --target "$TELEGRAM_TARGET" \
-        --message "$msg" 2>/dev/null || true
+    echo "[synology-backup notify shim] $msg" >&2
+    return 0
 }
