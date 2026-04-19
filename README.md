@@ -94,3 +94,7 @@ MIT
 - [ClawHub](https://clawhub.ai/pfrederiksen/synology-backup)
 - [OpenClaw](https://openclaw.ai)
 - [SKILL.md](./SKILL.md) — full configuration reference
+
+## Download History
+
+[![Download History](https://skill-history.com/chart/pfrederiksen/synology-backup.svg)](https://skill-history.com/pfrederiksen/synology-backup)
