@@ -197,7 +197,7 @@ ensure_mounted() {
     mkdir -p -- "$MOUNT"
     if [[ "$TRANSPORT" == "smb" ]]; then
         mount -t cifs "//${HOST}/${SHARE}" "$MOUNT" \
-            -o "credentials=${CREDS},vers=${SMB_VER}"
+            -o "credentials=${CREDS},vers=${SMB_VER},file_mode=0600,dir_mode=0700"
         echo "Mounted //${HOST}/${SHARE} → $MOUNT"
     fi
     # SSH transport: no local mount needed — rsync connects directly
